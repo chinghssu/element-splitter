@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+models/*.pt
+models/*.pth
+models/*.onnx
+.DS_Store
