@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from PIL.ImageQt import ImageQt  # 排在 PySide6 之後，見上面的說明
+from inpaint_engine import InpaintEngine
 from sam_engine import SamEngine
 
 CHECKER = 12  # 預覽棋盤格底圖的格子邊長（像素）
@@ -156,6 +157,7 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
 
         self.engine = SamEngine()
+        self.inpaint = InpaintEngine()
         self.image_path = None
         self.boxes = []  # list[BoxItem]，目前這個元素累積的框
         self.last_mask = None
@@ -225,6 +227,10 @@ class MainWindow(QMainWindow):
         export_btn = QPushButton("另存 PNG")
         export_btn.clicked.connect(self.export_png)
         side.addWidget(export_btn)
+
+        repair_btn = QPushButton("修補背景並另存")
+        repair_btn.clicked.connect(self.repair_background)
+        side.addWidget(repair_btn)
 
         next_btn = QPushButton("下一個元素（清空框）")
         next_btn.clicked.connect(self.next_element)
@@ -391,6 +397,32 @@ class MainWindow(QMainWindow):
             path += ".png"
         cutout = self.engine.cutout(self.last_mask, self.last_bbox)
         cutout.save(path)
+        self.status.showMessage(f"已存檔：{path}")
+
+    def repair_background(self):
+        if not self.boxes:
+            QMessageBox.information(self, "提示", "請先畫至少一個框圈住要移除的素材")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "修補背景並另存", "", "PNG (*.png)")
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+
+        # 刻意用「畫的框」本身（矩形聯集）當挖除範圍，不是 SAM 那個精細遮罩：SAM 遇到
+        # 低對比/半透明部位常常漏切一角，殘留的那一角會直接穿幫在補好的背景上；框多挖一點
+        # 背景，LaMa 補得動，比漏挖素材本身安全。
+        removal_mask = self.engine.box_union_mask([b.to_xyxy() for b in self.boxes])
+
+        self.status.showMessage("修補背景中…（第一次會下載模型，比較久）")
+        QApplication.processEvents()
+        try:
+            repaired = self.inpaint.repair(self.engine.source_rgb, removal_mask)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "修補失敗", str(e))
+            self.status.showMessage("修補失敗")
+            return
+        repaired.save(path)
         self.status.showMessage(f"已存檔：{path}")
 
     def next_element(self):

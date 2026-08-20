@@ -42,6 +42,11 @@ class SamEngine:
         self._image_path = path
 
     @property
+    def source_rgb(self):
+        """完整原圖 HWC RGB uint8（未裁切）——修補背景要用到洞外的上下文，不能只給裁切區域。"""
+        return self._source
+
+    @property
     def source_size(self):
         """(width, height) — 給 GUI 換算縮放座標用。"""
         h, w = self._source.shape[:2]
@@ -71,6 +76,22 @@ class SamEngine:
         ys1 = [b[3] for b in boxes_xyxy]
         bbox = (min(xs0), min(ys0), max(xs1), max(ys1))
         return union_mask, bbox
+
+    def box_union_mask(self, boxes_xyxy) -> np.ndarray:
+        """把畫的框本身（矩形，不經過 SAM）填成遮罩，回傳跟原圖同尺寸的 bool ndarray。
+
+        用途是「移除素材補背景」，不是「切透明 PNG」：後者要 SAM 的精細邊緣，前者寧可
+        多挖一點背景（LaMa 補得動）也不能漏挖到素材本身（SAM 對低對比/半透明部位常常
+        漏切一角，殘留的那塊會直接穿幫在補好的背景上）。所以這裡刻意不用 segment_union
+        算出來的遮罩。
+        """
+        h, w = self._source.shape[:2]
+        mask = np.zeros((h, w), dtype=bool)
+        for x0, y0, x1, y1 in boxes_xyxy:
+            xi0, yi0 = max(0, int(round(x0))), max(0, int(round(y0)))
+            xi1, yi1 = min(w, int(round(x1))), min(h, int(round(y1)))
+            mask[yi0:yi1, xi0:xi1] = True
+        return mask
 
     def cutout(self, mask: np.ndarray, bbox) -> Image.Image:
         """裁切到 bbox，RGB 取自原圖未修改的像素（不歸零），alpha 用遮罩。"""

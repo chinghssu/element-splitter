@@ -5,3 +5,4 @@ timm  # mobile_sam.modeling.tiny_vit_sam 需要，但套件本身沒宣告這個
 Pillow>=10.0
 numpy>=1.24
 PySide6>=6.5
+simple-lama-inpainting>=0.1.2  # 背景修補；第一次呼叫時自動下載 big-lama.pt（約 196MB）
