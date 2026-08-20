@@ -14,8 +14,13 @@
 import sys
 from pathlib import Path
 
+# PySide6 的 import 必須排在 `from PIL.ImageQt import ImageQt` 之前：PIL.ImageQt 會
+# 自動偵測要用哪個 Qt binding，規則是「誰已經在 sys.modules 裡就優先用誰，否則預設
+# 先試 PyQt6」。如果環境裡同時裝了 PyQt6（跟 PySide6 完全獨立、不衝突的另一套
+# binding），順序反了會變成 Pillow 先載入 PyQt6 的 QtCore，等一下這裡才 import
+# PySide6.QtCore 時，macOS 的 dyld 會把兩套同名的 QtCore.framework搞混，
+# 直接 crash（ImportError: Symbol not found）。
 from PIL import Image
-from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
@@ -39,6 +44,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from PIL.ImageQt import ImageQt  # 排在 PySide6 之後，見上面的說明
 from sam_engine import SamEngine
 
 CHECKER = 12  # 預覽棋盤格底圖的格子邊長（像素）
