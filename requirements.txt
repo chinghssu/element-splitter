@@ -1,0 +1,6 @@
+torch>=2.0
+torchvision>=0.15
+mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git
+timm  # mobile_sam.modeling.tiny_vit_sam 需要，但套件本身沒宣告這個相依
+Pillow>=10.0
+numpy>=1.24
