@@ -1,0 +1,1 @@
+pyinstaller>=6.0  # only needed to build a standalone app via main.spec, not to run app.py

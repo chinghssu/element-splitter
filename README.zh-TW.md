@@ -40,6 +40,26 @@ python app.py
 5. **Next Element**（下一個元素）清空目前的框，繼續在同一張圖上切下一個元素（圖片的
    SAM embedding 只算一次，不用重新載入）。
 
+## 打包成獨立 App
+
+```bash
+pip install -r requirements-dev.txt   # pyinstaller
+pyinstaller main.spec
+```
+
+會產出 `dist/element-splitter.app`（macOS），內含 PySide6、torch、MobileSAM 跟
+`mobile_sam.pt` checkpoint（總共約 1.4GB，torch 跟它的相依套件佔了大部分）。LaMa 的
+checkpoint**不會**打包進去，封裝後的 App 第一次用到修補功能時還是會照常下載，
+跟直接跑原始碼一樣。
+
+`main.spec` 特別排除了 PyQt5/PyQt6/PySide2，以及 torch 自己的 PyInstaller hook
+順手帶進來的一堆非必要開發用相依（matplotlib、IPython、sphinx、pytest…）——這些
+執行期都用不到，而且 matplotlib 會去偵測 Qt 後端進而牽扯到 PyQt，PyInstaller 不允許
+同時打包兩套 Qt binding，留著 matplotlib 就會直接打包失敗。
+
+打包出來沒有簽章。macOS 上多半需要先清掉隔離屬性才能開啟：
+`xattr -cr dist/element-splitter.app`。
+
 ## 已知限制
 
 - 只支援 box 提示，不支援點選提示。

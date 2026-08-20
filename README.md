@@ -44,6 +44,26 @@ python app.py
 5. **Next Element** clears the current boxes so you can cut another element out of the
    same image (the image's SAM embedding is computed once and reused).
 
+## Building a standalone app
+
+```bash
+pip install -r requirements-dev.txt   # pyinstaller
+pyinstaller main.spec
+```
+
+Produces `dist/element-splitter.app` (macOS) bundling PySide6, torch, MobileSAM and the
+`mobile_sam.pt` checkpoint (~1.4GB total — torch and its dependencies dominate that
+size). LaMa's checkpoint is *not* bundled; the packaged app still downloads it on first
+use of the repair feature, same as running from source.
+
+`main.spec` excludes PyQt5/PyQt6/PySide2 and a pile of optional dev dependencies
+(matplotlib, IPython, sphinx, pytest, ...) that torch's own PyInstaller hook pulls in —
+none of it is needed at runtime, and PyInstaller refuses to bundle two Qt bindings
+side by side, so leaving matplotlib in (it probes for a Qt backend) breaks the build.
+
+The build isn't code-signed. On macOS you'll likely need to clear the quarantine
+attribute before it will launch: `xattr -cr dist/element-splitter.app`.
+
 ## Known limitations
 
 - Box prompts only — no click/point prompts.

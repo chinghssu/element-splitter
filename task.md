@@ -21,3 +21,12 @@
 - [x] T14 手動驗收：用商品合照測試，發現直接用 SAM 精細遮罩補洞會漏挖到低對比部位
       （麵包本體完全沒被遮罩涵蓋，補完還在原處），改用「畫的框矩形聯集」當挖除範圍後
       素材完整移除，補丁品質堪用（不是無縫，但至少不會穿幫）
+- [x] T15 GUI 全面英文化；元素預覽（側邊）跟修補背景預覽（主畫布）分開，避免互相蓋掉；
+      「另存 PNG」改名「Save Element PNG」跟「Save Background PNG」對稱
+- [x] T16 雙語 README（`README.md` 英文 / `README.zh-TW.md` 繁中，互相連結）、
+      `LICENSE`（Apache-2.0，跟 MobileSAM／LaMa 原始授權一致）
+- [x] T17 `main.spec`：PyInstaller 打包成 macOS `.app`，內含 MobileSAM checkpoint；
+      排除 PyQt5/PyQt6/PySide2 跟 torch hook 帶進來的非必要開發相依（不排除的話
+      matplotlib 會拉 PyQt 進來，跟 PySide6 衝突直接打包失敗）；用
+      `ELEMENT_SPLITTER_SELFTEST` 環境變數在打包後的執行檔裡實測過 checkpoint
+      路徑解析與 `load_image()`，確認可行後移除測試程式碼
