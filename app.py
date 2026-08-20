@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-"""element-splitter — 畫框、跑 MobileSAM、把元素切成透明 PNG 的小 GUI（PySide6）。
+"""element-splitter — draw boxes, run MobileSAM, cut elements into transparent PNGs (PySide6).
 
     python app.py
 
-框都是獨立的 QGraphicsRectItem，場景座標系跟畫面縮放（滾輪 zoom）無關、就是原圖
-像素座標，所以：
-  - 拖曳畫框、刪除框，都是對場景物件直接增減，不會有「刪掉/取消後線還留在畫面上」
-    這種殘影問題（Tkinter 版舊 bug：拖曳中的暫時矩形沒有跟正式框共用同一個 tag，
-    清畫面時只清有 tag 的，暫時矩形就永遠留在畫布上）。
-  - 可以滾輪縮放來精確對邊界，還能用右側面板的數值欄位逐像素微調選取中的框，
-    比純滑鼠拖曳更精確。
+Boxes are independent QGraphicsRectItem objects. The scene's coordinate system is
+unaffected by view zoom, so:
+  - Drawing and deleting boxes are plain scene-item add/remove operations — no leftover
+    outlines when a box is cancelled or deleted (the old Tkinter version had this bug:
+    the temporary drag rectangle didn't share a tag with committed boxes, so clearing
+    the canvas only cleared tagged items and the temporary one stayed forever).
+  - Mouse-wheel zoom lets you line up edges precisely, and the coordinate spinboxes in
+    the side panel let you nudge a selected box pixel by pixel — more precise than a
+    freehand drag alone.
 """
 import sys
 from pathlib import Path
 
-# PySide6 的 import 必須排在 `from PIL.ImageQt import ImageQt` 之前：PIL.ImageQt 會
-# 自動偵測要用哪個 Qt binding，規則是「誰已經在 sys.modules 裡就優先用誰，否則預設
-# 先試 PyQt6」。如果環境裡同時裝了 PyQt6（跟 PySide6 完全獨立、不衝突的另一套
-# binding），順序反了會變成 Pillow 先載入 PyQt6 的 QtCore，等一下這裡才 import
-# PySide6.QtCore 時，macOS 的 dyld 會把兩套同名的 QtCore.framework搞混，
-# 直接 crash（ImportError: Symbol not found）。
+# PySide6 must be imported before `from PIL.ImageQt import ImageQt`: PIL.ImageQt
+# auto-detects which Qt binding to use — whichever is already in sys.modules wins,
+# otherwise it defaults to trying PyQt6 first. If the environment also has PyQt6
+# installed (a separate, otherwise-unrelated binding) and the import order is wrong,
+# Pillow loads PyQt6's QtCore first; when PySide6.QtCore is imported afterwards,
+# macOS's dyld conflates the two identically-named QtCore.framework bundles and
+# crashes outright (ImportError: Symbol not found).
 from PIL import Image
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
@@ -44,13 +47,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from PIL.ImageQt import ImageQt  # 排在 PySide6 之後，見上面的說明
+from PIL.ImageQt import ImageQt  # after PySide6 — see note above
 from inpaint_engine import InpaintEngine
 from sam_engine import SamEngine
 
-CHECKER = 12  # 預覽棋盤格底圖的格子邊長（像素）
+CHECKER = 12  # checkerboard tile size (px) for the transparent-preview backdrop
 BOX_PEN = QPen(QColor("#00ff88"), 2)
-BOX_PEN.setCosmetic(True)  # 線寬不隨 zoom 放大，縮放時邊框不會變得又粗又糊
+BOX_PEN.setCosmetic(True)  # keep line width constant across zoom levels
 SELECTED_PEN = QPen(QColor("#ffcc00"), 2)
 SELECTED_PEN.setCosmetic(True)
 
@@ -66,7 +69,8 @@ def checkerboard(w, h, size=CHECKER) -> Image.Image:
 
 
 class BoxItem(QGraphicsRectItem):
-    """一個畫好的框。rect() 就是原圖像素座標（scene 座標系不受 view 縮放影響）。"""
+    """One drawn box. rect() is in original-image pixel coordinates (scene space is
+    unaffected by view zoom)."""
 
     def __init__(self, rect: QRectF):
         super().__init__(rect)
@@ -80,12 +84,13 @@ class BoxItem(QGraphicsRectItem):
 
     def paint(self, painter, option, widget=None):
         self.setPen(SELECTED_PEN if self.isSelected() else BOX_PEN)
-        option.state &= ~option.state.__class__.State_Selected  # 不要 Qt 內建的虛線選取框
+        option.state &= ~option.state.__class__.State_Selected  # skip Qt's default dashed outline
         super().paint(painter, option, widget)
 
 
 class ImageView(QGraphicsView):
-    """圖片畫布：滾輪縮放、拖曳畫框（畫在空白處），點擊既有框則交給 Qt 處理選取。"""
+    """Image canvas: mouse-wheel zoom, drag-to-draw a box on empty space, or click an
+    existing box to let Qt handle selection."""
 
     def __init__(self, on_box_drawn):
         super().__init__()
@@ -94,6 +99,7 @@ class ImageView(QGraphicsView):
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
         self._bg_item = None
+        self._original_pixmap = None
         self._drag_start = None
         self._drag_item = None
         self.setDragMode(QGraphicsView.NoDrag)
@@ -103,10 +109,24 @@ class ImageView(QGraphicsView):
         self._drag_item = None
         qimg = ImageQt(pil_image.convert("RGB"))
         pix = QPixmap.fromImage(qimg)
+        self._original_pixmap = pix
         self._bg_item = self._scene.addPixmap(pix)
         self._bg_item.setZValue(0)
         self._scene.setSceneRect(0, 0, pix.width(), pix.height())
         self.resetTransform()
+
+    def show_overlay(self, pil_image: Image.Image):
+        """Temporarily swap the displayed background for a full-canvas result (e.g. a
+        background-repair preview) without touching the scene's box items or rect."""
+        if self._bg_item is None:
+            return
+        qimg = ImageQt(pil_image.convert("RGB"))
+        self._bg_item.setPixmap(QPixmap.fromImage(qimg))
+
+    def restore_original(self):
+        """Switch the background back to the originally loaded image."""
+        if self._bg_item is not None and self._original_pixmap is not None:
+            self._bg_item.setPixmap(self._original_pixmap)
 
     def wheelEvent(self, event):
         if self._bg_item is None:
@@ -120,7 +140,7 @@ class ImageView(QGraphicsView):
             return
         clicked = self.itemAt(event.pos())
         if isinstance(clicked, BoxItem):
-            super().mousePressEvent(event)  # 交給 Qt 處理選取／取消選取
+            super().mousePressEvent(event)  # let Qt handle select/deselect
             return
         pos = self.mapToScene(event.pos())
         self._drag_start = pos
@@ -144,7 +164,7 @@ class ImageView(QGraphicsView):
         self._drag_item = None
         self._drag_start = None
         if rect.width() < 4 or rect.height() < 4:
-            return  # 太小的拖曳直接丟棄，畫面上不會留下任何東西
+            return  # discard tiny drags — nothing is left behind on the canvas
         item = BoxItem(rect)
         self._scene.addItem(item)
         self.on_box_drawn(item)
@@ -159,10 +179,10 @@ class MainWindow(QMainWindow):
         self.engine = SamEngine()
         self.inpaint = InpaintEngine()
         self.image_path = None
-        self.boxes = []  # list[BoxItem]，目前這個元素累積的框
+        self.boxes = []  # list[BoxItem] — boxes accumulated for the current element
         self.last_mask = None
         self.last_bbox = None
-        self.last_repaired = None  # 修補背景後的完整 PIL Image，存檔前的暫存結果
+        self.last_repaired = None  # PIL.Image result from repair_background(), pending export
 
         self._build_ui()
 
@@ -173,7 +193,7 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(central)
 
         top = QHBoxLayout()
-        open_btn = QPushButton("開啟圖片")
+        open_btn = QPushButton("Open Image")
         open_btn.clicked.connect(self.open_image)
         top.addWidget(open_btn)
         top.addStretch(1)
@@ -192,16 +212,16 @@ class MainWindow(QMainWindow):
         side_widget.setFixedWidth(280)
         body.addWidget(side_widget)
 
-        side.addWidget(QLabel("目前元素的框："))
+        side.addWidget(QLabel("Boxes for this element:"))
         self.box_list = QListWidget()
         self.box_list.itemSelectionChanged.connect(self._on_list_selection_changed)
         side.addWidget(self.box_list)
 
-        del_btn = QPushButton("刪除選取的框")
+        del_btn = QPushButton("Delete Selected Box")
         del_btn.clicked.connect(self.delete_selected_box)
         side.addWidget(del_btn)
 
-        self.edit_group = QGroupBox("框座標微調（像素）")
+        self.edit_group = QGroupBox("Fine-tune box (pixels)")
         self.edit_group.setEnabled(False)
         form = QFormLayout(self.edit_group)
         self.spin_x0 = self._make_spin()
@@ -214,30 +234,30 @@ class MainWindow(QMainWindow):
         form.addRow("y1", self.spin_y1)
         side.addWidget(self.edit_group)
 
-        run_btn = QPushButton("執行 SAM")
+        run_btn = QPushButton("Run SAM")
         run_btn.clicked.connect(self.run_sam)
         side.addWidget(run_btn)
 
-        side.addWidget(QLabel("預覽："))
+        side.addWidget(QLabel("Element preview:"))
         self.preview_label = QLabel()
         self.preview_label.setFixedSize(240, 240)
         self.preview_label.setStyleSheet("background:#555;")
         self.preview_label.setAlignment(Qt.AlignCenter)
         side.addWidget(self.preview_label)
 
-        export_btn = QPushButton("另存 PNG")
+        export_btn = QPushButton("Save Element PNG")
         export_btn.clicked.connect(self.export_png)
         side.addWidget(export_btn)
 
-        repair_btn = QPushButton("修補背景（挖除框選範圍）")
+        repair_btn = QPushButton("Repair Background (remove boxed area)")
         repair_btn.clicked.connect(self.repair_background)
         side.addWidget(repair_btn)
 
-        export_repair_btn = QPushButton("另存修補結果 PNG")
+        export_repair_btn = QPushButton("Save Background PNG")
         export_repair_btn.clicked.connect(self.export_repaired_png)
         side.addWidget(export_repair_btn)
 
-        next_btn = QPushButton("下一個元素（清空框）")
+        next_btn = QPushButton("Next Element (clear boxes)")
         next_btn.clicked.connect(self.next_element)
         side.addWidget(next_btn)
 
@@ -245,7 +265,7 @@ class MainWindow(QMainWindow):
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
-        self.status.showMessage("請先開啟一張圖片")
+        self.status.showMessage("Open an image to get started")
 
     def _make_spin(self):
         spin = QDoubleSpinBox()
@@ -254,18 +274,18 @@ class MainWindow(QMainWindow):
         spin.valueChanged.connect(self._on_spin_changed)
         return spin
 
-    # ── 圖片載入 ────────────────────────────────────────────────────────────
+    # ── Image loading ───────────────────────────────────────────────────────
     def open_image(self):
-        path, _ = QFileDialog.getOpenFileName(self, "選擇圖片", "", "Images (*.png *.jpg *.jpeg)")
+        path, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.jpg *.jpeg)")
         if not path:
             return
-        self.status.showMessage("載入模型與圖片中…（第一次會比較久）")
+        self.status.showMessage("Loading model and image... (first run is slower)")
         QApplication.processEvents()
         try:
             self.engine.load_image(path)
-        except Exception as e:  # noqa: BLE001 — 直接把錯誤原因顯示給使用者
-            QMessageBox.critical(self, "載入失敗", str(e))
-            self.status.showMessage("載入失敗")
+        except Exception as e:  # noqa: BLE001 — surface the real error to the user
+            QMessageBox.critical(self, "Load Failed", str(e))
+            self.status.showMessage("Load failed")
             return
 
         self.image_path = path
@@ -278,10 +298,11 @@ class MainWindow(QMainWindow):
         self.last_mask, self.last_bbox = None, None
         self.last_repaired = None
         w, h = self.engine.source_size
-        self.status.showMessage(f"已載入 {Path(path).name}（{w}x{h}）")
+        self.status.showMessage(f"Loaded {Path(path).name} ({w}x{h})")
 
-    # ── 畫框 / 選取 / 微調 ──────────────────────────────────────────────────
+    # ── Drawing / selection / fine-tuning ──────────────────────────────────
     def _on_box_drawn(self, item: BoxItem):
+        self.view.restore_original()  # drawing a new box means we're editing again
         self.boxes.append(item)
         list_item = QListWidgetItem(self._box_label(item))
         list_item.setData(Qt.UserRole, item)
@@ -328,7 +349,7 @@ class MainWindow(QMainWindow):
         item = selected[0]
         x0, y0, x1, y1 = self.spin_x0.value(), self.spin_y0.value(), self.spin_x1.value(), self.spin_y1.value()
         if x1 <= x0 or y1 <= y0:
-            return  # 微調中途數值暫時不合法（例如還沒打完），先不套用
+            return  # mid-edit values can be momentarily invalid (e.g. still typing) — skip
         item.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
         idx = self.boxes.index(item)
         self.box_list.item(idx).setText(self._box_label(item))
@@ -347,27 +368,28 @@ class MainWindow(QMainWindow):
             self.box_list.addItem(list_item)
         self._sync_spinboxes(None)
 
-    # ── SAM 推論 ────────────────────────────────────────────────────────────
+    # ── SAM inference ───────────────────────────────────────────────────────
     def run_sam(self):
         if self.image_path is None:
-            QMessageBox.information(self, "提示", "請先開啟圖片")
+            QMessageBox.information(self, "Notice", "Open an image first")
             return
         if not self.boxes:
-            QMessageBox.information(self, "提示", "請先畫至少一個框")
+            QMessageBox.information(self, "Notice", "Draw at least one box first")
             return
 
-        self.status.showMessage("執行 SAM 中…")
+        self.view.restore_original()
+        self.status.showMessage("Running SAM...")
         QApplication.processEvents()
         boxes_xyxy = [b.to_xyxy() for b in self.boxes]
         try:
             mask, bbox = self.engine.segment_union(boxes_xyxy)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "SAM 執行失敗", str(e))
-            self.status.showMessage("SAM 執行失敗")
+            QMessageBox.critical(self, "SAM Failed", str(e))
+            self.status.showMessage("SAM failed")
             return
 
         if not mask.any():
-            self.status.showMessage("沒切到東西（遮罩是空的），試試看調整框的範圍")
+            self.status.showMessage("Nothing was segmented (empty mask) — try adjusting the boxes")
             self._clear_preview()
             self.last_mask, self.last_bbox = None, None
             return
@@ -377,9 +399,11 @@ class MainWindow(QMainWindow):
         self._show_preview(cutout)
         x0, y0, x1, y1 = (int(v) for v in bbox)
         coverage = mask[y0:y1, x0:x1].mean()
-        self.status.showMessage(f"完成，覆蓋率 {coverage * 100:.1f}%（{len(self.boxes)} 個框聯集）")
+        self.status.showMessage(f"Done. Coverage {coverage * 100:.1f}% ({len(self.boxes)} box(es) union)")
 
     def _show_preview(self, cutout_img: Image.Image):
+        """Small side-panel preview of the extracted element (transparent PNG on a
+        checkerboard backdrop). Kept separate from the main-canvas repair preview."""
         pw, ph = self.preview_label.width(), self.preview_label.height()
         img = cutout_img.copy()
         img.thumbnail((pw, ph))
@@ -391,54 +415,56 @@ class MainWindow(QMainWindow):
     def _clear_preview(self):
         self.preview_label.clear()
 
-    # ── 匯出 / 下一個元素 ───────────────────────────────────────────────────
+    # ── Export / next element ───────────────────────────────────────────────
     def export_png(self):
         if self.last_mask is None:
-            QMessageBox.information(self, "提示", "請先執行 SAM 且遮罩不是空的")
+            QMessageBox.information(self, "Notice", "Run SAM first and make sure the mask isn't empty")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "另存 PNG", "", "PNG (*.png)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Element PNG", "", "PNG (*.png)")
         if not path:
             return
         if not path.lower().endswith(".png"):
             path += ".png"
         cutout = self.engine.cutout(self.last_mask, self.last_bbox)
         cutout.save(path)
-        self.status.showMessage(f"已存檔：{path}")
+        self.status.showMessage(f"Saved: {path}")
 
     def repair_background(self):
         if not self.boxes:
-            QMessageBox.information(self, "提示", "請先畫至少一個框圈住要移除的素材")
+            QMessageBox.information(self, "Notice", "Draw at least one box around the element to remove")
             return
 
-        # 刻意用「畫的框」本身（矩形聯集）當挖除範圍，不是 SAM 那個精細遮罩：SAM 遇到
-        # 低對比/半透明部位常常漏切一角，殘留的那一角會直接穿幫在補好的背景上；框多挖一點
-        # 背景，LaMa 補得動，比漏挖素材本身安全。
+        # Deliberately use the drawn boxes themselves (rectangle union), not SAM's
+        # fine-grained mask: SAM often misses a sliver of low-contrast or translucent
+        # material, and that leftover sliver would show up unrepaired. Over-covering
+        # with the box is safe — LaMa can fill extra background — but under-covering
+        # the element itself is not.
         removal_mask = self.engine.box_union_mask([b.to_xyxy() for b in self.boxes])
 
-        self.status.showMessage("修補背景中…（第一次會下載模型，比較久）")
+        self.status.showMessage("Repairing background... (first run also downloads the model)")
         QApplication.processEvents()
         try:
             repaired = self.inpaint.repair(self.engine.source_rgb, removal_mask)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "修補失敗", str(e))
-            self.status.showMessage("修補失敗")
+            QMessageBox.critical(self, "Repair Failed", str(e))
+            self.status.showMessage("Repair failed")
             return
 
         self.last_repaired = repaired
-        self._show_preview(repaired.convert("RGBA"))
-        self.status.showMessage("修補完成，預覽是挖除後的結果，滿意的話按「另存修補結果 PNG」")
+        self.view.show_overlay(repaired)  # full-size result belongs on the main canvas, not the small side preview
+        self.status.showMessage('Repair done — showing the result on the canvas. Click "Save Background PNG" to keep it.')
 
     def export_repaired_png(self):
         if self.last_repaired is None:
-            QMessageBox.information(self, "提示", "請先按「修補背景」")
+            QMessageBox.information(self, "Notice", 'Click "Repair Background" first')
             return
-        path, _ = QFileDialog.getSaveFileName(self, "另存修補結果 PNG", "", "PNG (*.png)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Background PNG", "", "PNG (*.png)")
         if not path:
             return
         if not path.lower().endswith(".png"):
             path += ".png"
         self.last_repaired.save(path)
-        self.status.showMessage(f"已存檔：{path}")
+        self.status.showMessage(f"Saved: {path}")
 
     def next_element(self):
         for item in self.boxes:
@@ -447,9 +473,10 @@ class MainWindow(QMainWindow):
         self.box_list.clear()
         self._sync_spinboxes(None)
         self._clear_preview()
+        self.view.restore_original()
         self.last_mask, self.last_bbox = None, None
         self.last_repaired = None
-        self.status.showMessage("已清空框，畫下一個元素")
+        self.status.showMessage("Boxes cleared — draw the next element")
 
 
 def main():

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""doctor — 檢查這台電腦能不能跑 element-splitter，缺什麼就補什麼。
+"""doctor — check whether this machine can run element-splitter, and fix what's missing.
 
-    python doctor.py          只檢查，不動任何東西
-    python doctor.py --fix    下載缺少的 checkpoint
+    python doctor.py          check only, changes nothing
+    python doctor.py --fix    download the missing checkpoint
 
-sha256 採 trust-on-first-use：models/SOURCES.json 裡該欄位是 null 時，第一次下載
-成功後把算出來的 sha256 寫回去；之後每次 --fix 都會用那個值驗證完整性，避免之後
-遠端檔案被置換掉卻沒察覺。
+sha256 uses trust-on-first-use: when that field in models/SOURCES.json is null, the
+first successful download writes back the computed sha256; every later --fix verifies
+against it, so a swapped remote file doesn't go unnoticed.
 """
 import hashlib
 import json
@@ -35,7 +35,7 @@ def check_python():
     if (major, minor) >= (3, 10):
         print(f"{OK} Python {major}.{minor}")
         return True
-    print(f"{BAD} Python {major}.{minor}，需要 3.10 以上")
+    print(f"{BAD} Python {major}.{minor}, need 3.10 or newer")
     return False
 
 
@@ -45,16 +45,19 @@ def check_packages():
         ("torch", "torch"),
         ("PIL", "Pillow"),
         ("numpy", "numpy"),
-        ("mobile_sam", "mobile-sam（見 requirements.txt 的 git 安裝方式）"),
+        ("mobile_sam", "mobile-sam (see requirements.txt for the git install)"),
+        ("timm", "timm (mobile_sam's TinyViT needs it, but doesn't declare it)"),
+        ("PySide6", "PySide6"),
+        ("simple_lama_inpainting", "simple-lama-inpainting"),
     ]:
         try:
             __import__(mod)
             print(f"{OK} {hint}")
         except ImportError:
-            print(f"{BAD} {hint} 未安裝")
+            print(f"{BAD} {hint} not installed")
             missing.append(hint)
     if missing:
-        print(f"{WARN} 請先執行：pip install -r requirements.txt")
+        print(f"{WARN} Run: pip install -r requirements.txt")
         return False
     return True
 
@@ -67,40 +70,40 @@ def check_checkpoint() -> bool:
         if path.exists():
             digest = sha256_of(path)
             if meta.get("sha256") and digest != meta["sha256"]:
-                print(f"{BAD} {name}：sha256 不符（可能損毀或被置換），請刪除後重新 --fix")
+                print(f"{BAD} {name}: sha256 mismatch (corrupted or swapped) — delete it and run --fix again")
                 ok = False
                 continue
             print(f"{OK} {name}")
             continue
 
-        print(f"{BAD} {name} 缺失（約 {meta.get('approx_size_mb', '?')}MB）")
+        print(f"{BAD} {name} missing (~{meta.get('approx_size_mb', '?')}MB)")
         ok = False
         if not FIX:
             continue
 
-        print(f"    下載中：{meta['url']}")
+        print(f"    Downloading: {meta['url']}")
         MODELS.mkdir(exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".part")
         try:
             urllib.request.urlretrieve(meta["url"], tmp)
-        except Exception as e:  # noqa: BLE001 — 下載失敗原因要如實印出來
-            print(f"{BAD} 下載失敗：{e}")
+        except Exception as e:  # noqa: BLE001 — surface the real download error
+            print(f"{BAD} Download failed: {e}")
             tmp.unlink(missing_ok=True)
             continue
 
         digest = sha256_of(tmp)
         if meta.get("sha256"):
             if digest != meta["sha256"]:
-                print(f"{BAD} 下載完但 sha256 不符，已刪除，請重試")
+                print(f"{BAD} Downloaded but sha256 mismatch — deleted, please retry")
                 tmp.unlink(missing_ok=True)
                 continue
         else:
             meta["sha256"] = digest
             SOURCES.write_text(json.dumps(sources, indent=2, ensure_ascii=False) + "\n")
-            print(f"{WARN} 首次下載，已記錄 sha256={digest[:16]}… 供之後驗證")
+            print(f"{WARN} First download — recorded sha256={digest[:16]}... for future checks")
 
         tmp.rename(path)
-        print(f"{OK} {name} 下載完成")
+        print(f"{OK} {name} downloaded")
         ok = True
     return ok
 
@@ -109,9 +112,9 @@ def main():
     checks = [check_python(), check_packages(), check_checkpoint()]
     print()
     if all(checks):
-        print(f"{OK} 一切就緒，可以執行：python app.py")
+        print(f"{OK} Everything's ready — run: python app.py")
     else:
-        print(f"{BAD} 還有項目沒過。" + ("" if FIX else " 執行 `python doctor.py --fix` 試著自動修。"))
+        print(f"{BAD} Some checks failed." + ("" if FIX else " Try `python doctor.py --fix` to auto-fix."))
         sys.exit(1)
 
 

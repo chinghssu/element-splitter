@@ -1,19 +1,24 @@
-"""inpaint_engine — 包裝 LaMa（simple-lama-inpainting）：對完整原圖的遮罩區域補洞。
+"""inpaint_engine — wraps LaMa (simple-lama-inpainting): repair the masked region of
+the full source image.
 
-跟 sam_engine.SamEngine 是兩個獨立的模型，互不依賴、也不共用快取。SimpleLama 是惰性
-載入（第一次呼叫 repair() 才建立），第一次會自動下載 TorchScript checkpoint
-（約 196MB，快取在 torch hub 目錄，不歸這個專案的 models/ 管）。
+Independent of sam_engine.SamEngine — separate model, no shared state. SimpleLama is
+lazily instantiated (only on the first repair() call); that first call also downloads
+the TorchScript checkpoint (~196MB, cached in the torch hub directory, not managed by
+this project's models/).
 
-MAX_SIDE 限制：LaMa 的 Fourier Convolution 是全域運算，記憶體隨解析度暴增。實測在
-MacBook Air M2 16GB 上，一張 1672x941 的圖 peak memory footprint 衝到約 19.5GB
-（超過實體記憶體，會嚴重拖慢甚至被系統砍掉行程）；縮到長邊 1024 之後降到約 8.1GB，
-在 16GB 機器上才留得住安全餘裕。所以固定在較低解析度跑 LaMa，推論完只把補好的內容
-貼回遮罩範圍，畫面其他地方維持原始解析度的像素，不整張跟著模糊。
+MAX_SIDE cap: LaMa's Fourier Convolutions are a global operation, so memory use
+explodes with resolution. Measured on a MacBook Air M2 16GB: a 1672x941 image pushed
+peak memory footprint to about 19.5GB (beyond physical RAM — severe slowdowns or the
+process getting killed outright); capping the long side to 1024 brought that down to
+about 8.1GB, which leaves a safe margin on a 16GB machine. So LaMa always runs at a
+capped resolution, and only the repaired pixels within the mask get pasted back onto
+the full-resolution source — the rest of the image keeps its original pixels instead of
+going blurry from the resize round-trip.
 """
 import numpy as np
 from PIL import Image
 
-MAX_SIDE = 1024  # 見上方說明：這是記憶體安全邊界，不是畫質考量
+MAX_SIDE = 1024  # see module docstring — a memory-safety bound, not a quality choice
 
 
 class InpaintEngine:
@@ -28,9 +33,12 @@ class InpaintEngine:
             self._lama = SimpleLama()
 
     def repair(self, source_rgb: np.ndarray, mask: np.ndarray) -> Image.Image:
-        """source_rgb: 完整原圖 HWC RGB uint8（未裁切——LaMa 要看得到洞外的紋理才補得像）。
-        mask: 跟原圖同尺寸的 bool ndarray，True 代表要補的區域。回傳補好洞、跟原圖同尺寸的
-        完整 RGB 圖；只有遮罩範圍內的像素會被換成修補結果，其餘維持原始解析度像素。
+        """source_rgb: full, uncropped source image as HWC RGB uint8 (LaMa needs to see
+        the context outside the hole to fill it plausibly).
+        mask: bool ndarray the same size as the source, True marks the region to repair.
+        Returns the full repaired RGB image at the source's original size; only pixels
+        inside the mask come from the repair — everything else keeps its original
+        resolution.
         """
         self._ensure_model()
         h, w = source_rgb.shape[:2]
@@ -46,8 +54,8 @@ class InpaintEngine:
             small_source, small_mask = source_img, mask_img
 
         small_result = self._lama(small_source, small_mask)
-        # LaMa 內部另外把圖片 pad 到 8 的倍數再推論，輸出會比丟進去的尺寸多幾像素，
-        # 裁掉多的部分。
+        # LaMa also pads the image to a multiple of 8 internally, so the output is a
+        # few pixels larger than what went in — crop the extra off.
         small_result = small_result.crop((0, 0, small_source.width, small_source.height))
 
         if scale < 1.0:
@@ -55,8 +63,9 @@ class InpaintEngine:
         else:
             upscaled = small_result
 
-        # 只把遮罩範圍內的像素換成修補結果，範圍外貼回原圖的原始像素，避免整張圖
-        # 都被縮放-放大這一趟拖成模糊。
+        # Only pixels inside the mask come from the (possibly upscaled) repair; outside
+        # the mask, paste back the untouched source so the whole image doesn't go soft
+        # from the downscale/upscale round-trip.
         composited = source_img.copy()
         composited.paste(upscaled, (0, 0), mask_img)
         return composited

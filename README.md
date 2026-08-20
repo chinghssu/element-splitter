@@ -1,34 +1,73 @@
 # element-splitter
 
-畫框、跑 MobileSAM、把圖片裡的元素切成透明 PNG 的小工具。跟 `auto_ppt` 專案完全獨立。
+A small desktop tool for cutting elements out of a flat image (illustrations, product
+photos, screenshots) into transparent PNGs using MobileSAM, and optionally repairing the
+background where an element was removed using LaMa — similar to Canva's "move an
+element, the hole gets filled in" effect.
 
-## 安裝
+Fully independent of any other project: standalone Python, standalone repo, no shared
+code.
+
+其他語言：[繁體中文](README.zh-TW.md)
+
+## Install
 
 ```bash
 pip install -r requirements.txt
-python doctor.py --fix   # 下載 MobileSAM checkpoint（約 40MB）
+python doctor.py --fix   # downloads the MobileSAM checkpoint (~40MB)
 ```
 
-`doctor.py`（不加 `--fix`）可以隨時拿來檢查環境缺什麼。
+Run `doctor.py` without `--fix` any time to check what's missing.
 
-## 使用
+The background-repair feature downloads an additional ~196MB LaMa checkpoint the first
+time you use it (cached by `torch.hub`, not managed by this project's `models/`).
+
+## Usage
 
 ```bash
 python app.py
 ```
 
-1. 「開啟圖片」選一張 PNG/JPG。
-2. 在畫布上拖曳畫框，框住想切的元素。同一個元素可以畫多個框（例如主體 + 被切開的細長
-   部位或色差較大的貼紙區塊），按「執行 SAM」時會把所有框的遮罩做聯集。
-3. 右側會即時預覽切出來的去背結果（棋盤格底）。
-4. 「另存 PNG」存成透明背景圖檔。
-5. 「下一個元素」清空目前的框，繼續在同一張圖上切下一個元素（圖片的 embedding 只算一次，
-   不用重新載入）。
+1. **Open Image** — pick a PNG/JPG.
+2. Drag on the canvas to draw a box around the element you want to cut out. One element
+   can have several boxes (e.g. the main body plus a thin protruding part, or a
+   high-contrast sticker/label area) — **Run SAM** unions all of their masks.
+   - Scroll to zoom in for pixel-precise placement; a selected box's coordinates can
+     also be fine-tuned with the x0/y0/x1/y1 spinboxes in the side panel.
+3. The side panel shows a live preview of the cut-out element (transparent PNG on a
+   checkerboard backdrop). **Save Element PNG** writes it to disk.
+4. **Repair Background (remove boxed area)** removes the boxed element from the source
+   image using LaMa inpainting and shows the result on the main canvas. **Save
+   Background PNG** writes that out once you're happy with it.
+   - This uses the *drawn boxes* as the removal area, not SAM's precise mask — see
+     "Known limitations" below for why.
+5. **Next Element** clears the current boxes so you can cut another element out of the
+   same image (the image's SAM embedding is computed once and reused).
 
-## 已知限制
+## Known limitations
 
-- 只支援 box 提示，不支援點選提示。
-- 遇到顏色/紋理跟主體差很多的部位（貼紙、半透明包裝內可見的物體）常會被 SAM 當成獨立
-  區塊排除掉，需要手動多畫一個框把它補進聯集——這是 SAM box 提示的已知行為，不是這個
-  工具的 bug。
-- 沒有磁碟 embedding 快取、沒有批次處理，見 `requirement.md` 的非目標。
+- Box prompts only — no click/point prompts.
+- SAM sometimes excludes a part of the object that's very different in color/texture
+  from the rest (a sticker, or something visible through translucent packaging) — you
+  may need an extra box to bring it into the union. This is normal behavior for a
+  box-prompted segmenter, not a bug in this tool.
+- **Background repair intentionally uses the union of your drawn boxes, not SAM's fine
+  mask, as the area to remove.** Early testing showed that feeding SAM's precise mask to
+  LaMa left a visible sliver of the original object untouched exactly where SAM had
+  excluded a low-contrast part — the object never fully disappeared. Over-covering with
+  a rectangle is safe (LaMa can plausibly fill extra background); under-covering the
+  element is not.
+- **Memory**: LaMa's Fourier Convolutions are a global operation, and memory use grows
+  sharply with image resolution. Measured on a MacBook Air M2 (16GB RAM): inpainting a
+  1672x941 image directly pushed peak memory footprint to ~19.5GB — beyond the machine's
+  physical RAM, causing severe slowdowns or the process being killed. To stay safe,
+  `inpaint_engine.py` always runs LaMa on a copy capped at 1024px on the long side
+  (measured peak: ~8.3GB) and only pastes the repaired pixels back into the removal
+  area on the full-resolution image — everything else keeps its original pixels, so
+  quality outside the repaired patch is unaffected.
+- No on-disk embedding cache, no batch processing across multiple files — see
+  `requirement.md`'s non-goals.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
