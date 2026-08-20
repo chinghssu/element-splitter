@@ -162,6 +162,7 @@ class MainWindow(QMainWindow):
         self.boxes = []  # list[BoxItem]，目前這個元素累積的框
         self.last_mask = None
         self.last_bbox = None
+        self.last_repaired = None  # 修補背景後的完整 PIL Image，存檔前的暫存結果
 
         self._build_ui()
 
@@ -228,9 +229,13 @@ class MainWindow(QMainWindow):
         export_btn.clicked.connect(self.export_png)
         side.addWidget(export_btn)
 
-        repair_btn = QPushButton("修補背景並另存")
+        repair_btn = QPushButton("修補背景（挖除框選範圍）")
         repair_btn.clicked.connect(self.repair_background)
         side.addWidget(repair_btn)
+
+        export_repair_btn = QPushButton("另存修補結果 PNG")
+        export_repair_btn.clicked.connect(self.export_repaired_png)
+        side.addWidget(export_repair_btn)
 
         next_btn = QPushButton("下一個元素（清空框）")
         next_btn.clicked.connect(self.next_element)
@@ -271,6 +276,7 @@ class MainWindow(QMainWindow):
         self.box_list.clear()
         self._clear_preview()
         self.last_mask, self.last_bbox = None, None
+        self.last_repaired = None
         w, h = self.engine.source_size
         self.status.showMessage(f"已載入 {Path(path).name}（{w}x{h}）")
 
@@ -403,11 +409,6 @@ class MainWindow(QMainWindow):
         if not self.boxes:
             QMessageBox.information(self, "提示", "請先畫至少一個框圈住要移除的素材")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "修補背景並另存", "", "PNG (*.png)")
-        if not path:
-            return
-        if not path.lower().endswith(".png"):
-            path += ".png"
 
         # 刻意用「畫的框」本身（矩形聯集）當挖除範圍，不是 SAM 那個精細遮罩：SAM 遇到
         # 低對比/半透明部位常常漏切一角，殘留的那一角會直接穿幫在補好的背景上；框多挖一點
@@ -422,7 +423,21 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "修補失敗", str(e))
             self.status.showMessage("修補失敗")
             return
-        repaired.save(path)
+
+        self.last_repaired = repaired
+        self._show_preview(repaired.convert("RGBA"))
+        self.status.showMessage("修補完成，預覽是挖除後的結果，滿意的話按「另存修補結果 PNG」")
+
+    def export_repaired_png(self):
+        if self.last_repaired is None:
+            QMessageBox.information(self, "提示", "請先按「修補背景」")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "另存修補結果 PNG", "", "PNG (*.png)")
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        self.last_repaired.save(path)
         self.status.showMessage(f"已存檔：{path}")
 
     def next_element(self):
@@ -433,6 +448,7 @@ class MainWindow(QMainWindow):
         self._sync_spinboxes(None)
         self._clear_preview()
         self.last_mask, self.last_bbox = None, None
+        self.last_repaired = None
         self.status.showMessage("已清空框，畫下一個元素")
 
 
